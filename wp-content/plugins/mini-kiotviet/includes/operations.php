@@ -2,16 +2,30 @@
 if (!defined('ABSPATH')) exit;
 function mkv_cap($area='view') { return current_user_can('manage_options') || current_user_can('mkv_'.$area); }
 function mkv_require($area='view') { if(!mkv_cap($area)) wp_die('Không có quyền truy cập.'); }
+function mkv_product_role_caps() {
+  $caps=[];
+  foreach(['edit_mkv_product','read_mkv_product','delete_mkv_product','create_mkv_products','edit_mkv_products','edit_others_mkv_products','publish_mkv_products','read_private_mkv_products','delete_mkv_products','delete_private_mkv_products','delete_published_mkv_products','delete_others_mkv_products','edit_private_mkv_products','edit_published_mkv_products','manage_mkv_categories'] as $cap) $caps[$cap]=true;
+  return $caps;
+}
 function mkv_roles_install() {
+  $product=mkv_product_role_caps();
   foreach(['mkv_manager'=>'Manager','mkv_sales'=>'Sales','mkv_warehouse'=>'Warehouse'] as $key=>$label) {
     $caps=['read'=>true,'mkv_view'=>true];
-    if($key==='mkv_manager') $caps+=['mkv_customers'=>true,'mkv_inventory'=>true,'mkv_orders'=>true,'mkv_reports'=>true,'mkv_settings'=>true];
+    if($key==='mkv_manager') $caps+=['mkv_customers'=>true,'mkv_inventory'=>true,'mkv_orders'=>true,'mkv_reports'=>true,'mkv_settings'=>true,'upload_files'=>true]+$product;
     if($key==='mkv_sales') $caps+=['mkv_customers'=>true,'mkv_orders'=>true];
     if($key==='mkv_warehouse') $caps+=['mkv_inventory'=>true];
     add_role($key,$label,$caps);
     $role=get_role($key); if($role) foreach($caps as $c=>$v) $role->add_cap($c,$v);
   }
+  $admin=get_role('administrator'); if($admin){ foreach($product as $c=>$v) $admin->add_cap($c,$v); $admin->add_cap('mkv_view'); }
+  update_option('mkv_caps_version','2');
 }
+add_action('admin_init', function(){
+  if (get_option('mkv_caps_version')==='2') return;
+  mkv_roles_install();
+  $user=wp_get_current_user();
+  if ($user && $user->ID) $user->get_role_caps();
+});
 add_action('admin_menu',function(){
   $menus=['customers'=>['Khách hàng','mkv_customers'],'inventory'=>['Quản lý kho','mkv_inventory'],'orders'=>['Đơn hàng','mkv_orders'],'reports'=>['Báo cáo','mkv_reports'],'settings'=>['Cài đặt cửa hàng','mkv_settings'],'notifications'=>['Thông báo','mkv_view']];
   foreach($menus as $slug=>$row) add_submenu_page('mkv-dashboard',$row[0],$row[0],current_user_can('manage_options')?'manage_options':$row[1],'mkv-'.$slug,'mkv_page_'.$slug);
@@ -21,7 +35,8 @@ function mkv_post($key) {return sanitize_text_field(wp_unslash($_POST[$key]??'')
 function mkv_action($scope) {return $_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['mkv_action']) && wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['_mkv_nonce']??'')),'mkv_'.$scope);}
 function mkv_form_start($scope,$action) {echo '<form method="post">';wp_nonce_field('mkv_'.$scope,'_mkv_nonce');echo '<input type="hidden" name="mkv_action" value="'.esc_attr($action).'">';}
 function mkv_page_customers() {
-  mkv_require('customers'); global $wpdb; $t=$wpdb->prefix.'mkv_customers';echo '<div class="wrap"><h1>Khách hàng</h1>';
+  mkv_require('customers'); global $wpdb; $t=$wpdb->prefix.'mkv_customers'; $orders=$wpdb->prefix.'mkv_orders';
+  echo '<div class="wrap"><h1>Khách hàng</h1>';
   if(mkv_action('customers')) {
     $id=absint($_POST['id']??0);$action=mkv_post('mkv_action');
     if($action==='delete'){$wpdb->delete($t,['id'=>$id],['%d']);mkv_notice('Đã xóa khách hàng.');}
@@ -34,10 +49,26 @@ function mkv_page_customers() {
   $edit=absint($_GET['edit']??0);$c=$edit?$wpdb->get_row($wpdb->prepare("SELECT * FROM $t WHERE id=%d",$edit),ARRAY_A):[];
   echo '<h2>'.($edit?'Sửa':'Thêm').' khách hàng</h2>';mkv_form_start('customers','save');echo '<input type="hidden" name="id" value="'.esc_attr($edit).'">';
   foreach(['name'=>'Họ tên','email'=>'Email','phone'=>'Số điện thoại','address'=>'Địa chỉ','points'=>'Điểm'] as $key=>$label) echo '<p><label>'.esc_html($label).' <input class="regular-text" name="'.esc_attr($key).'" value="'.esc_attr($c[$key]??'').'"></label></p>';
-  submit_button('Lưu khách hàng');echo '</form><h2>Danh sách</h2>';
-  $search=sanitize_text_field(wp_unslash($_GET['s']??''));$where='';if($search){$like='%'.$wpdb->esc_like($search).'%';$where=$wpdb->prepare(' WHERE name LIKE %s OR phone LIKE %s OR email LIKE %s',$like,$like,$like);}
-  $page=max(1,absint($_GET['paged']??1));$offset=($page-1)*20;$rows=$wpdb->get_results("SELECT * FROM $t $where ORDER BY id DESC LIMIT 20 OFFSET $offset",ARRAY_A);$total=(int)$wpdb->get_var("SELECT COUNT(*) FROM $t $where");
-  echo '<form method="get"><input type="hidden" name="page" value="mkv-customers"><input name="s" value="'.esc_attr($search).'" placeholder="Tìm tên, email, số điện thoại"><button class="button">Tìm</button></form><table class="widefat striped"><thead><tr><th>ID</th><th>Tên</th><th>Email</th><th>Phone</th><th>Điểm</th><th>Thao tác</th></tr></thead><tbody>';
+  submit_button('Lưu khách hàng');echo '</form>';
+  if($edit){
+    $history=$wpdb->get_results($wpdb->prepare("SELECT id,status,total,created_at FROM $orders WHERE customer_id=%d ORDER BY id DESC LIMIT 20",$edit));
+    echo '<h2>Lịch sử mua</h2>';
+    if(!$history) echo '<p>Chưa có đơn hàng.</p>';
+    else {echo '<table class="widefat striped"><thead><tr><th>Đơn</th><th>Trạng thái</th><th>Tổng tiền</th><th>Ngày</th></tr></thead><tbody>';foreach($history as $order) echo '<tr><td>#'.esc_html($order->id).'</td><td>'.esc_html($order->status).'</td><td>'.esc_html(number_format((float)$order->total)).' đ</td><td>'.esc_html($order->created_at).'</td></tr>';echo '</tbody></table>';}
+  }
+  echo '<h2>Danh sách</h2>';
+  $search=sanitize_text_field(wp_unslash($_GET['s']??''));
+  $filter=sanitize_key(wp_unslash($_GET['filter']??''));
+  if(!in_array($filter,['bought','new'],true)) $filter='';
+  $where=[];$args=[];
+  if($search!==''){$like='%'.$wpdb->esc_like($search).'%';$where[]='(name LIKE %s OR phone LIKE %s OR email LIKE %s)';array_push($args,$like,$like,$like);}
+  if($filter==='bought') $where[]="EXISTS (SELECT 1 FROM $orders o WHERE o.customer_id=$t.id AND o.status IN ('paid','shipping','completed'))";
+  if($filter==='new') $where[]="NOT EXISTS (SELECT 1 FROM $orders o WHERE o.customer_id=$t.id AND o.status IN ('paid','shipping','completed'))";
+  $sql_where=$where?' WHERE '.implode(' AND ',$where):'';
+  $page=max(1,absint($_GET['paged']??1));$offset=($page-1)*20;
+  $rows=$wpdb->get_results($wpdb->prepare("SELECT * FROM $t $sql_where ORDER BY id DESC LIMIT 20 OFFSET %d",...array_merge($args,[$offset])),ARRAY_A);
+  $total=(int)($args?$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $t $sql_where",...$args)):$wpdb->get_var("SELECT COUNT(*) FROM $t $sql_where"));
+  echo '<form method="get"><input type="hidden" name="page" value="mkv-customers"><input name="s" value="'.esc_attr($search).'" placeholder="Tìm tên, email, số điện thoại"> <select name="filter"><option value="">Tất cả</option><option value="bought" '.selected($filter,'bought',false).'>Đã mua hàng</option><option value="new" '.selected($filter,'new',false).'>Chưa mua hàng</option></select> <button class="button">Lọc</button></form><table class="widefat striped"><thead><tr><th>ID</th><th>Tên</th><th>Email</th><th>Phone</th><th>Điểm</th><th>Thao tác</th></tr></thead><tbody>';
   foreach($rows as $r){echo '<tr><td>'.esc_html($r['id']).'</td><td>'.esc_html($r['name']).'</td><td>'.esc_html($r['email']).'</td><td>'.esc_html($r['phone']).'</td><td>'.esc_html($r['points']).'</td><td><a href="'.esc_url(admin_url('admin.php?page=mkv-customers&edit='.$r['id'])).'">Sửa</a> ';mkv_form_start('customers','delete');echo '<input type="hidden" name="id" value="'.esc_attr($r['id']).'"><button class="button-link" onclick="return confirm(\'Xóa khách hàng?\')">Xóa</button></form></td></tr>';}
   echo '</tbody></table>';echo paginate_links(['base'=>add_query_arg('paged','%#%'),'current'=>$page,'total'=>max(1,ceil($total/20))]);echo '</div>';
 }
@@ -48,7 +79,7 @@ function mkv_stock_change($product,$warehouse,$delta,$type,$reference=0) {
  if($current===null || (int)$current+$delta<0){return false;}
  $ok=$wpdb->update($inv,['quantity'=>(int)$current+$delta],['warehouse_id'=>$warehouse,'product_id'=>$product]);
  $logged=$wpdb->insert($mov,['product_id'=>$product,'warehouse_id'=>$warehouse,'quantity_change'=>$delta,'movement_type'=>$type,'reference_id'=>$reference?:null,'created_at'=>current_time('mysql')]);
- if($ok===false || !$logged){return false;}$wpdb->query('COMMIT');return true;
+ if($ok===false || !$logged){return false;}return true;
 }
 function mkv_page_inventory(){
  mkv_require('inventory');global $wpdb;$wh=$wpdb->prefix.'mkv_warehouses';$inv=$wpdb->prefix.'mkv_inventory';echo '<div class="wrap"><h1>Quản lý kho</h1>';
@@ -75,7 +106,7 @@ function mkv_page_orders(){
  if($action==='create'){
  $customer=absint($_POST['customer']??0);$product=absint($_POST['product']??0);$qty=absint($_POST['quantity']??0);$warehouse=absint($_POST['warehouse']??0);$price=(float)get_post_meta($product,'_mkv_sale_price',true);
  if(!$product||get_post_type($product)!=='mkv_product'||!$qty||!$warehouse||$price<=0)mkv_notice('Sản phẩm, kho, số lượng hoặc giá không hợp lệ.','error');
- else{$wpdb->query('START TRANSACTION');$ok=$wpdb->insert($orders,['customer_id'=>$customer?:null,'status'=>'draft','total'=>$price*$qty,'created_at'=>current_time('mysql')]);$id=$wpdb->insert_id;$ok2=$ok?$wpdb->insert($items,['order_id'=>$id,'product_id'=>$product,'quantity'=>$qty,'unit_price'=>$price]):false;if($ok&&$ok2){$wpdb->query('COMMIT');mkv_notice('Đã tạo đơn nháp #'.$id.'. Chọn kho khi thanh toán.');}else{$wpdb->query('ROLLBACK');mkv_notice('Không tạo được đơn.','error');}}
+ else{$available=(int)$wpdb->get_var($wpdb->prepare("SELECT quantity FROM $inv WHERE warehouse_id=%d AND product_id=%d",$warehouse,$product));if($available<$qty)mkv_notice('Không đủ tồn kho để tạo đơn. Hiện có '.$available.'.','error');else{$wpdb->query('START TRANSACTION');$ok=$wpdb->insert($orders,['customer_id'=>$customer?:null,'status'=>'draft','total'=>$price*$qty,'created_at'=>current_time('mysql')]);$id=$wpdb->insert_id;$ok2=$ok?$wpdb->insert($items,['order_id'=>$id,'product_id'=>$product,'quantity'=>$qty,'unit_price'=>$price]):false;if($ok&&$ok2){$wpdb->query('COMMIT');mkv_notice('Đã tạo đơn nháp #'.$id.'.');}else{$wpdb->query('ROLLBACK');mkv_notice('Không tạo được đơn.','error');}}}
  }
  if($action==='status'){
  $new=mkv_post('status');$warehouse=absint($_POST['warehouse']??0);$order=$wpdb->get_row($wpdb->prepare("SELECT * FROM $orders WHERE id=%d",$id));$valid=['draft'=>['pending','cancelled'],'pending'=>['paid','cancelled'],'paid'=>['shipping','completed','cancelled'],'shipping'=>['completed','cancelled'],'completed'=>[],'cancelled'=>[]];
@@ -96,6 +127,64 @@ function mkv_page_orders(){
  foreach($rows as $r){echo '<tr><td>#'.esc_html($r['id']).'</td><td>'.esc_html($r['customer']?:'Khách lẻ').'</td><td>'.esc_html($r['status']).'</td><td>'.esc_html(number_format((float)$r['total'])).' đ</td><td>'.esc_html($r['created_at']).'</td><td>';mkv_form_start('orders','status');echo '<input type="hidden" name="id" value="'.esc_attr($r['id']).'"><select name="status">';foreach(['draft','pending','paid','shipping','completed','cancelled'] as $s)echo '<option value="'.esc_attr($s).'" '.selected($r['status'],$s,false).'>'.esc_html(ucfirst($s)).'</option>';echo '</select> Kho: <select name="warehouse">';foreach($warehouses as $w)echo '<option value="'.esc_attr($w['id']).'">'.esc_html($w['name']).'</option>';echo '</select> <button class="button">Lưu</button></form></td></tr>';}
  echo '</table></div>';
 }
-function mkv_page_reports(){mkv_require('reports');global $wpdb;$t=$wpdb->prefix.'mkv_orders';$period=sanitize_text_field($_GET['period']??'month');$period=in_array($period,['day','week','month','year'],true)?$period:'month';$start=['day'=>date('Y-m-d 00:00:00',current_time('timestamp')),'week'=>date('Y-m-d 00:00:00',strtotime('monday this week',current_time('timestamp'))),'month'=>date('Y-m-01 00:00:00',current_time('timestamp')),'year'=>date('Y-01-01 00:00:00',current_time('timestamp'))][$period];$stats=$wpdb->get_row($wpdb->prepare("SELECT COUNT(*) AS orders,COALESCE(SUM(total),0) AS revenue FROM $t WHERE status IN ('paid','shipping','completed') AND paid_at >= %s",$start));$customers=(int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}mkv_customers WHERE created_at >= %s",$start));echo '<div class="wrap"><h1>Báo cáo</h1><form><input type="hidden" name="page" value="mkv-reports"><select name="period">';foreach(['day'=>'Ngày','week'=>'Tuần','month'=>'Tháng','year'=>'Năm'] as $k=>$v)echo '<option value="'.esc_attr($k).'" '.selected($period,$k,false).'>'.esc_html($v).'</option>';echo '</select> <button class="button">Xem</button></form><p>Doanh thu: <strong>'.esc_html(number_format((float)$stats->revenue)).' đ</strong></p><p>Số đơn đã thanh toán: '.esc_html($stats->orders).'</p><p>Khách hàng mới: '.esc_html($customers).'</p><h2>Sản phẩm bán chạy</h2>';$top=$wpdb->get_results($wpdb->prepare("SELECT p.post_title,SUM(i.quantity) qty FROM {$wpdb->prefix}mkv_order_items i JOIN $t o ON o.id=i.order_id JOIN {$wpdb->posts} p ON p.ID=i.product_id WHERE o.status IN ('paid','shipping','completed') AND o.paid_at >= %s GROUP BY i.product_id,p.post_title ORDER BY qty DESC LIMIT 10",$start));foreach($top as $r)echo '<p>'.esc_html($r->post_title).' — '.esc_html($r->qty).'</p>';echo '</div>';}
-function mkv_page_settings(){mkv_require('settings');echo '<div class="wrap"><h1>Cài đặt cửa hàng</h1>';if(mkv_action('settings')){foreach(['name','logo','vat','currency','address','email'] as $k){$v=mkv_post($k);if($k==='email')$v=sanitize_email($v);if($k==='logo')$v=esc_url_raw($v);if($k==='vat')$v=(string)max(0,(float)$v);update_option('mkv_store_'.$k,$v);}mkv_notice('Đã lưu cài đặt.');}mkv_form_start('settings','save');foreach(['name'=>'Tên cửa hàng','logo'=>'URL logo (Media Library)','vat'=>'VAT (%)','currency'=>'Tiền tệ','address'=>'Địa chỉ','email'=>'Email'] as $k=>$label)echo '<p><label>'.esc_html($label).' <input class="regular-text" name="'.esc_attr($k).'" value="'.esc_attr(get_option('mkv_store_'.$k,$k==='currency'?'VND':'')).'"></label></p>';submit_button('Lưu');echo '</form></div>';}
-function mkv_page_notifications(){mkv_require('view');global $wpdb;$inv=$wpdb->prefix.'mkv_inventory';$orders=$wpdb->prefix.'mkv_orders';$low=$wpdb->get_results("SELECT p.post_title,COALESCE(SUM(i.quantity),0) qty FROM {$wpdb->posts} p LEFT JOIN $inv i ON i.product_id=p.ID WHERE p.post_type='mkv_product' AND p.post_status='publish' GROUP BY p.ID,p.post_title HAVING qty<=5 LIMIT 50");$new=$wpdb->get_results("SELECT id,created_at FROM $orders WHERE created_at >= DATE_SUB(NOW(),INTERVAL 1 DAY) ORDER BY id DESC LIMIT 20");echo '<div class="wrap"><h1>Thông báo</h1><h2>Đơn mới (24 giờ)</h2>';foreach($new as $r)echo '<p>Đơn #'.esc_html($r->id).' — '.esc_html($r->created_at).'</p>';echo '<h2>Hết hàng / tồn kho thấp (≤ 5)</h2>';foreach($low as $r)echo '<p>'.esc_html($r->post_title).' — '.esc_html($r->qty).'</p>';echo '</div>';}
+function mkv_page_reports(){
+  mkv_require('reports'); global $wpdb; $t=$wpdb->prefix.'mkv_orders';
+  $period=sanitize_text_field(wp_unslash($_GET['period']??'month'));
+  $period=in_array($period,['day','week','month','year'],true)?$period:'month';
+  $now=current_time('timestamp');
+  $start=['day'=>date('Y-m-d 00:00:00',$now),'week'=>date('Y-m-d 00:00:00',strtotime('monday this week',$now)),'month'=>date('Y-m-01 00:00:00',$now),'year'=>date('Y-01-01 00:00:00',$now)][$period];
+  $stats=$wpdb->get_row($wpdb->prepare("SELECT COUNT(*) AS orders,COALESCE(SUM(total),0) AS revenue FROM $t WHERE status IN ('paid','shipping','completed') AND paid_at >= %s",$start));
+  $customers=(int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->prefix}mkv_customers WHERE created_at >= %s",$start));
+  $points=[];$cursor=strtotime(substr($start,0,10));$end=strtotime(date('Y-m-d',$now));$guard=0;
+  while($cursor!==false && $cursor<=$end && $guard<400){
+    $day=date('Y-m-d',$cursor);$next=date('Y-m-d',strtotime($day.' +1 day'));
+    $revenue=(float)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(total),0) FROM $t WHERE status IN ('paid','shipping','completed') AND paid_at >= %s AND paid_at < %s",$day.' 00:00:00',$next.' 00:00:00'));
+    $points[]=['label'=>substr($day,5),'revenue'=>$revenue];
+    $cursor=strtotime($next);$guard++;
+  }
+  echo '<div class="wrap"><h1>Báo cáo</h1><form method="get"><input type="hidden" name="page" value="mkv-reports"><select name="period">';
+  foreach(['day'=>'Ngày','week'=>'Tuần','month'=>'Tháng','year'=>'Năm'] as $k=>$v) echo '<option value="'.esc_attr($k).'" '.selected($period,$k,false).'>'.esc_html($v).'</option>';
+  echo '</select> <button class="button">Xem</button></form>';
+  echo '<p>Doanh thu: <strong>'.esc_html(number_format((float)$stats->revenue)).' đ</strong></p><p>Số đơn đã thanh toán: '.esc_html($stats->orders).'</p><p>Khách hàng mới: '.esc_html($customers).'</p>';
+  echo '<h2>Doanh thu theo ngày</h2><div style="height:280px;max-width:960px"><canvas id="mkv-report-chart"></canvas></div><script>window.mkvReportChart='.wp_json_encode($points).';</script><h2>Sản phẩm bán chạy</h2>';
+  $top=$wpdb->get_results($wpdb->prepare("SELECT p.post_title,SUM(i.quantity) qty FROM {$wpdb->prefix}mkv_order_items i JOIN $t o ON o.id=i.order_id JOIN {$wpdb->posts} p ON p.ID=i.product_id WHERE o.status IN ('paid','shipping','completed') AND o.paid_at >= %s GROUP BY i.product_id,p.post_title ORDER BY qty DESC LIMIT 10",$start));
+  if(!$top) echo '<p>Chưa có dữ liệu.</p>';
+  foreach($top as $r) echo '<p>'.esc_html($r->post_title).' — '.esc_html($r->qty).'</p>';
+  echo '</div>';
+}
+function mkv_page_settings(){
+  mkv_require('settings');
+  echo '<div class="wrap"><h1>Cài đặt cửa hàng</h1>';
+  if(mkv_action('settings')){
+    foreach(['name','logo','vat','currency','address','email'] as $k){
+      $v=mkv_post($k);
+      if($k==='email') $v=sanitize_email($v);
+      if($k==='logo') $v=esc_url_raw($v);
+      if($k==='vat') $v=(string)max(0,(float)$v);
+      update_option('mkv_store_'.$k,$v);
+    }
+    mkv_notice('Đã lưu cài đặt.');
+  }
+  mkv_form_start('settings','save');
+  foreach(['name'=>'Tên cửa hàng','vat'=>'VAT (%)','currency'=>'Tiền tệ','address'=>'Địa chỉ','email'=>'Email'] as $k=>$label) echo '<p><label>'.esc_html($label).' <input class="regular-text" name="'.esc_attr($k).'" value="'.esc_attr(get_option('mkv_store_'.$k,$k==='currency'?'VND':'')).'"></label></p>';
+  $logo=get_option('mkv_store_logo','');
+  echo '<p><label>Logo<br><input id="mkv-store-logo" class="regular-text" name="logo" value="'.esc_attr($logo).'"></label> <button type="button" class="button" id="mkv-pick-logo">Chọn từ Media</button></p>';
+  if($logo) echo '<p><img src="'.esc_url($logo).'" alt="" style="max-width:160px;height:auto"></p>';
+  submit_button('Lưu');
+  echo '</form></div><script>document.getElementById("mkv-pick-logo").addEventListener("click",function(e){e.preventDefault();if(typeof wp==="undefined"||!wp.media){window.alert("Không mở được thư viện Media.");return;}var frame=wp.media({title:"Chọn logo",button:{text:"Dùng logo này"},multiple:false});frame.on("select",function(){var file=frame.state().get("selection").first().toJSON();document.getElementById("mkv-store-logo").value=file.url;});frame.open();});</script>';
+}
+function mkv_page_notifications(){
+  mkv_require('view'); global $wpdb; $orders=$wpdb->prefix.'mkv_orders';
+  $new=$wpdb->get_results("SELECT id,status,created_at FROM $orders WHERE created_at >= DATE_SUB(NOW(), INTERVAL 1 DAY) ORDER BY id DESC LIMIT 20");
+  $alerts=mkv_stock_alert_rows();
+  echo '<div class="wrap"><h1>Thông báo</h1><h2>Đơn mới (24 giờ)</h2>';
+  if(!$new) echo '<p>Không có đơn mới.</p>';
+  foreach($new as $r) echo '<p>Đơn #'.esc_html($r->id).' — '.esc_html($r->status).' — '.esc_html($r->created_at).'</p>';
+  echo '<h2>Hết hàng</h2>';
+  if(!$alerts['out']) echo '<p>Không có sản phẩm hết hàng.</p>';
+  foreach(array_slice($alerts['out'],0,50) as $r) echo '<p>'.esc_html($r['name']).' — 0</p>';
+  echo '<h2>Tồn dưới mức tối thiểu</h2>';
+  if(!$alerts['low']) echo '<p>Không có sản phẩm dưới ngưỡng.</p>';
+  foreach(array_slice($alerts['low'],0,50) as $r) echo '<p>'.esc_html($r['name']).' — còn '.esc_html($r['quantity']).' (ngưỡng '.esc_html($r['min_stock']).')</p>';
+  echo '</div>';
+}

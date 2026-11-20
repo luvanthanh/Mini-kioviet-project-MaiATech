@@ -12,9 +12,12 @@ function mkv_product_fields($post) {
         $val = get_post_meta($post->ID, '_mkv_'.$key, true);
         $type = in_array($key, ['cost_price','sale_price','min_stock'], true) ? 'number' : 'text';
         $attrs = $type === 'number' ? 'min="0" step="'.($key === 'min_stock'?'1':'0.01').'"' : 'maxlength="190"';
-        printf('<p><label for="mkv_%1$s"><strong>%2$s</strong></label><br><input style="width:100%%;max-width:450px" id="mkv_%1$s" name="mkv_%1$s" type="%3$s" value="%4$s" %5$s></p>', esc_attr($key), esc_html($label), esc_attr($type), esc_attr($val), $attrs);
+        printf('<p><label for="mkv_%1$s"><strong>%2$s</strong></label><br><input style="width:100%%;max-width:450px" id="mkv_%1$s" name="mkv_%1$s" type="%3$s" value="%4$s" %5$s>', esc_attr($key), esc_html($label), esc_attr($type), esc_attr($val), $attrs);
+        if ($key === 'barcode') echo ' <button type="button" class="button" id="mkv-gen-barcode">Sinh barcode</button>';
+        echo '</p>';
     }
-    echo '<p><strong>Tồn kho hiện tại:</strong> '.esc_html(mkv_product_stock($post->ID)).' (được quản lý bằng nghiệp vụ nhập/xuất/chuyển kho ở Giai đoạn 3, không sửa trực tiếp tại đây).</p>';
+    echo '<p><strong>Tồn kho hiện tại:</strong> '.esc_html(mkv_product_stock($post->ID)).' (được quản lý bằng nhập/xuất/chuyển kho, không sửa trực tiếp tại đây).</p>';
+    echo '<script>document.getElementById("mkv-gen-barcode").addEventListener("click",function(){var input=document.getElementById("mkv_barcode");var n="893"+String(Math.floor(Math.random()*1e9)).padStart(9,"0");input.value=n;});</script>';
 }
 function mkv_product_stock($id) {
     global $wpdb;
@@ -29,7 +32,7 @@ function mkv_product_duplicate($field, $value, $exclude) {
 add_filter('wp_insert_post_data', function($data, $postarr, $unsanitized, $update) {
     if (($data['post_type'] ?? '') !== 'mkv_product' || !isset($_POST['mkv_product_nonce'])) return $data;
     if (!wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['mkv_product_nonce'])), 'mkv_save_product')) return $data;
-    if (!current_user_can('edit_posts')) return $data;
+    if (!current_user_can('edit_mkv_products')) return $data;
     if (in_array($data['post_status'] ?? '', ['auto-draft','trash'], true)) return $data;
     $id = (int)($postarr['ID'] ?? 0);
     $name = trim(wp_strip_all_tags($data['post_title'] ?? ''));
@@ -41,7 +44,8 @@ add_filter('wp_insert_post_data', function($data, $postarr, $unsanitized, $updat
     $errors=[];
     if ($name === '') $errors[]='Tên sản phẩm bắt buộc.';
     if ($sku === '') $errors[]='SKU bắt buộc.';
-    if ($barcode === '') $errors[]='Barcode bắt buộc.';
+    if ($barcode === '') $barcode = mkv_generate_barcode($id);
+    $_POST['mkv_barcode'] = $barcode;
     if (mkv_product_duplicate('sku',$sku,$id)) $errors[]='SKU đã tồn tại.';
     if (mkv_product_duplicate('barcode',$barcode,$id)) $errors[]='Barcode đã tồn tại.';
     if (!is_numeric($cost) || (float)$cost <= 0) $errors[]='Giá nhập phải lớn hơn 0.';
@@ -103,7 +107,7 @@ add_action('restrict_manage_posts', function($post_type) {
     echo ' <a class="button" href="'.esc_url($url).'">Xuất CSV</a>';
 });
 add_action('admin_post_mkv_export_products', function() {
-    if (!current_user_can('edit_posts')) wp_die('Không có quyền.');
+    if (!current_user_can('edit_mkv_products')) wp_die('Không có quyền.');
     check_admin_referer('mkv_export_products');
     $posts=get_posts(['post_type'=>'mkv_product','post_status'=>'publish','numberposts'=>-1]);
     nocache_headers();
@@ -120,5 +124,37 @@ add_action('admin_post_mkv_export_products', function() {
 });
 add_action('admin_notices', function() {
     $screen=get_current_screen();
-    if ($screen && $screen->id==='edit-mkv_product') echo '<div class="notice notice-info"><p><strong>Mini KiotViet:</strong> Chọn “Thêm Bài Viết” để thêm sản phẩm. Tồn kho được quản lý ở Giai đoạn 3.</p></div>';
+    if ($screen && $screen->id==='edit-mkv_product') echo '<div class="notice notice-info"><p><strong>Mini KiotViet:</strong> Chọn “Thêm sản phẩm” để thêm. Barcode có thể để trống để hệ thống tự sinh, hoặc bấm “Sinh barcode”. Tồn kho được quản lý ở mục Quản lý kho. Chọn nhiều dòng rồi dùng “Xóa” để xóa hàng loạt.</p></div>';
 });
+add_filter('bulk_actions-edit-mkv_product', function($actions) {
+    if (isset($actions['trash'])) $actions['trash'] = 'Xóa';
+    return $actions;
+});
+function mkv_generate_barcode($exclude) {
+    for ($i = 0; $i < 20; $i++) {
+        $code = '893' . str_pad((string) random_int(0, 999999999), 9, '0', STR_PAD_LEFT);
+        if (!mkv_product_duplicate('barcode', $code, $exclude)) return $code;
+    }
+    return '893' . str_pad((string) (time() % 1000000000), 9, '0', STR_PAD_LEFT);
+}
+function mkv_stock_alert_rows() {
+    global $wpdb;
+    $rows = $wpdb->get_results("SELECT p.post_title AS name, COALESCE(SUM(inv.quantity),0) AS quantity, CAST(COALESCE(MAX(pm.meta_value),'5') AS SIGNED) AS min_stock FROM {$wpdb->posts} p LEFT JOIN {$wpdb->prefix}mkv_inventory inv ON inv.product_id=p.ID LEFT JOIN {$wpdb->postmeta} pm ON pm.post_id=p.ID AND pm.meta_key='_mkv_min_stock' WHERE p.post_type='mkv_product' AND p.post_status='publish' GROUP BY p.ID, p.post_title", ARRAY_A);
+    $out = [];
+    $low = [];
+    foreach ($rows as $row) {
+        $qty = (int) $row['quantity'];
+        $min = max(0, (int) $row['min_stock']);
+        $row['quantity'] = $qty;
+        $row['min_stock'] = $min;
+        if ($qty <= 0) $out[] = $row;
+        elseif ($min > 0 && $qty <= $min) $low[] = $row;
+    }
+    return ['out' => $out, 'low' => $low];
+}
+function mkv_low_stock_products($limit = 5) {
+    $alerts = mkv_stock_alert_rows();
+    $rows = array_merge($alerts['low'], $alerts['out']);
+    usort($rows, function ($a, $b) { return (int) $a['quantity'] <=> (int) $b['quantity']; });
+    return array_slice($rows, 0, $limit);
+}

@@ -1,0 +1,15 @@
+MINI KIOTVIET - BAN SUA LOI KHOI DONG
+
+1. Sao luu folder plugin cu va export database qua phpMyAdmin truoc khi thay the.
+2. Giai nen ZIP; chep folder mini-kiotviet vao wp-content/plugins/ (ghi de file cu).
+3. Bat Apache va MySQL trong XAMPP.
+4. Vao wp-admin > Plugins. Neu plugin da active, thu tai lai wp-admin.
+5. Neu menu khong hien, deactivate va activate lai Mini KiotViet (KHONG xoa database).
+6. Thu Dashboard, San pham, Danh muc, Khach hang, Quan ly kho, Don hang, Bao cao.
+7. Neu van loi, bat WP_DEBUG_LOG va gui wp-content/debug.log.
+
+GHI CHU:
+- Khac phuc class MKV_Product_Admin bi thieu, ket noi lai products.php/operations.php.
+- Khoi phuc dashboard template va duong dan assets.
+- Chua refactor het 9 module: operations.php va products.php van la code cu.
+- Chi kiem tra PHP syntax tren moi truong tao ZIP; chua kiem thu WordPress/XAMPP thuc te.
