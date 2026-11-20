@@ -1,0 +1,15 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & temporary files
+*.log
+*.tmp
+*.bak
+*.zip
+*.wpress
+wp-content/debug.log
+wp-content/upgrade/
+wp-content/ai1wm-backups/
+wp-content/cache/
