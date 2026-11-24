@@ -1,16 +1,40 @@
 <?php
 if (!defined('ABSPATH')) exit;
 
+
 class MKV_Plugin {
+    public static function enqueue_assets() {
+        $page = sanitize_key($_GET['page'] ?? '');
+
+        if ($page !== 'mkv-customers') {
+            return;
+        }
+
+        $css_path = MKV_PATH . 'assets/Customer.css';
+
+        if (is_readable($css_path)) {
+            wp_enqueue_style(
+                'mkv-customers-css',
+                MKV_URL . 'assets/Customer.css',
+                [],
+                filemtime($css_path)
+            );
+        }
+    }
     public static function boot() {
-        // Dashboard and product module are available; remaining business pages
-        // are temporarily backed by the original, fully implemented operations.php.
+        add_action('admin_enqueue_scripts', [self::class, 'enqueue_assets']);
         require_once MKV_PATH . 'modules/dashboard/class-dashboard-admin.php';
         require_once MKV_PATH . 'modules/dashboard/class-dashboard-api.php';
+
+        // Products
+        require_once MKV_PATH . 'modules/products/class-product-repository.php';
         require_once MKV_PATH . 'modules/products/class-product-admin.php';
+
+        // Chức năng cũ vẫn được giữ nguyên
         require_once MKV_PATH . 'includes/products.php';
         require_once MKV_PATH . 'includes/operations.php';
 
+        // Đăng ký các module
         MKV_Permissions::register();
         MKV_Product_Admin::register();
         MKV_Dashboard_Admin::register();

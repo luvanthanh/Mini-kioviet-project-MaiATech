@@ -15,6 +15,21 @@ class MKV_Dashboard_Api {
     }
 
     public static function data() {
+            if (!class_exists('MKV_Database')) {
+                return new WP_Error(
+                    'mkv_missing_database',
+                    'Class MKV_Database chưa được tải',
+                    ['status' => 500]
+                );
+            }
+
+            if (!class_exists('MKV_Product_Repository')) {
+                return new WP_Error(
+                    'mkv_missing_repository',
+                    'Class MKV_Product_Repository chưa được tải',
+                    ['status' => 500]
+                );
+            }
         global $wpdb;
         $orders = MKV_Database::table('mkv_orders');
         $customers = MKV_Database::table('mkv_customers');
